@@ -1,17 +1,18 @@
 /***********************************************
  * Ripple Grid + Multi-touch Knob for HOLD_MS
- * - 两指：进入旋钮控制，冻结画面；捏合/张开旋钮左/右转 → 改 HOLD_MS
- * - 单指点击空白：退出控制，恢复播放
- * - 长按拖动：连续发射波源；格子循环「□→○→△→□」
+ * - 长按拖动：沿途连续发射波源；格子循环「□→○→△→□」
+ * - 松手：停止发射；已触发格子走完当前循环回到正方形后停
+ * - 两指捏合/张开：进入旋钮控制模式（冻结画面），调 HOLD_MS
+ * - 单指点击空白：退出控制模式，恢复播放
  ***********************************************/
 
 // ===== 可调参数 =====
 const COLS = 6, ROWS = 8, GAP = 16;
 const N = 120, SW_MAIN = 3.0, BASE_ALPHA = 230;
 
-const HALF_MS = 300;           // 变形时长固定
-let   HOLD_MS = 1500;          // 停留时长（旋钮控制）
-const HOLD_MIN = 30, HOLD_MAX = 4000;
+const HALF_MS = 300;                   // 变形时间固定
+let   HOLD_MS = 1500;                  // 停留时间（旋钮控制）
+const HOLD_MIN = 30, HOLD_MAX = 3000;  // ★ 旋钮范围（显示同步）
 
 const LONGPRESS_MS = 350;
 const WAVE_SPEED_PX_PER_MS = 0.8;
@@ -20,7 +21,7 @@ const ACTIVATION_BAND = 40;
 const EMIT_INTERVAL_MS = 40;
 const MAX_EMITTERS = 800;
 
-// ===== 派生量（每帧根据 HOLD_MS 更新）=====
+// ===== 派生量（随 HOLD_MS 更新）=====
 let SEG_MS = HALF_MS + HOLD_MS;
 let CYCLE_MS = 3 * SEG_MS;
 
@@ -34,7 +35,7 @@ let cirX=new Float32Array(N), cirY=new Float32Array(N);
 let rBase=120;
 
 // ===== 每格状态 =====
-// startMs:  -1 未触发；>=0 激活时间（基于逻辑时钟）；-2 已完成
+// startMs:  -1 未触发；>=0 激活时间（逻辑时钟）；-2 已完成
 // stopAtMs: -1 长按中不需要；>=0 松手后该格应在此时刻（含）停止在□
 let startMs=[], stopAtMs=[];
 
@@ -52,23 +53,22 @@ let logicalNow = 0;     // 累加的逻辑时间（ms）
 let lastReal = 0;       // 上一帧真实时间
 let clockPaused = false;
 
-// 长按判定起点（用逻辑时钟）
+// 长按判定起点（逻辑时钟）
 let downAtMs = 0;
 
 // ===== 旋钮控制模式 =====
 const KNOB_RADIUS = 80;
-const KNOB_RING = 6;
-const KNOB_SENSITIVITY = 3.0; // 每1px 距离变化 ≈ 3ms
+const KNOB_SENSITIVITY = 3.0; // 每 1px 距离变化 ≈ 3ms
 let knob = {
   active: false,
   center: {x:0, y:0},
-  baseDist: 0,      // 进入时两指距
-  lastDist: 0,      // 上一帧两指距
-  angle: 0,         // 视觉角度（deg）
-  enteredAt: 0      // 进入时的逻辑时间
+  baseDist: 0,
+  lastDist: 0,
+  angle: 0,        // 仅视觉
+  enteredAt: 0
 };
 
-// ====== 基础 ======
+// ===== 基础 =====
 function setup(){
   createCanvas(windowWidth, windowHeight);
   smooth(); strokeJoin(ROUND); strokeCap(ROUND); noFill();
@@ -96,7 +96,7 @@ function resetForNewGesture(){
   lastEmitMs = 0;
 }
 
-// ====== 逻辑时钟：可冻结 ======
+// ===== 逻辑时钟：可冻结 =====
 function updateClock(){
   const realNow = millis();
   const dt = realNow - lastReal;
@@ -104,48 +104,45 @@ function updateClock(){
   lastReal = realNow;
 }
 
-// ====== 每帧 ======
+// ===== 主循环 =====
 function draw(){
   updateClock();
 
-  // 按 HOLD_MS 派生节奏
+  // 随 HOLD_MS 更新节奏
   SEG_MS = HALF_MS + HOLD_MS;
   CYCLE_MS = 3 * SEG_MS;
 
   background(0);
 
-  // 控制模式：冻结画面（不发射、不推进动画）；仅绘制当前冻结帧与旋钮
   if(knob.active){
-    clockPaused = true; // 已在 updateClock 中保持冻结
-    drawSceneFrozen();
-    drawKnobOverlay();
+    // 控制模式：冻结画面 + 旋钮
+    clockPaused = true;
+    renderGrid();        // logicalNow 不变，画面冻结
+    drawKnobOverlay();   // 画旋钮
     return;
   }else{
     clockPaused = false;
   }
 
-  // 非控制模式：正常模拟/渲染
+  // 非控制模式：模拟 + 渲染
   simulateEmittersAndActivations();
   renderGrid();
 }
 
-// ====== 模拟与渲染 ======
+// ===== 模拟与渲染 =====
 function simulateEmittersAndActivations(){
   // 长按判定
   if(isPointerDown && !isLongPress){
     if(logicalNow - downAtMs >= LONGPRESS_MS){
-      // 开始新一轮
       isLongPress = true;
       resetForNewGesture();
       spawnEmitter(logicalNow, lastPointer.x, lastPointer.y);
     }
   }
-
   // 长按中：沿路径周期发射
   if(isLongPress && logicalNow - lastEmitMs >= EMIT_INTERVAL_MS){
     spawnEmitter(logicalNow, lastPointer.x, lastPointer.y);
   }
-
   // 清理过期发射器
   pruneEmitters(logicalNow);
 }
@@ -157,7 +154,7 @@ function renderGrid(){
     for(let ix=0; ix<COLS; ix++){
       const c = tileCenter(ix,iy);
 
-      // 未触发 → 是否被任一发射器命中
+      // 未触发 → 检查是否被任一发射器命中
       if(isLongPress && startMs[iy][ix] < 0){
         if(hitByAnyEmitter(now, c.x, c.y)){
           startMs[iy][ix] = now;
@@ -200,7 +197,7 @@ function renderGrid(){
   }
 }
 
-// ====== 发射器 ======
+// ===== 发射器 =====
 function spawnEmitter(t, x, y){
   emitters.push({ t0:t, x, y });
   lastEmitMs = t;
@@ -208,7 +205,6 @@ function spawnEmitter(t, x, y){
     emitters.splice(0, emitters.length - MAX_EMITTERS);
   }
 }
-
 function hitByAnyEmitter(now, px, py){
   for(let i=emitters.length-1; i>=0; i--){
     const e = emitters[i];
@@ -220,7 +216,6 @@ function hitByAnyEmitter(now, px, py){
   }
   return false;
 }
-
 function pruneEmitters(now){
   let cut = 0;
   for(let i=0;i<emitters.length;i++){
@@ -232,7 +227,7 @@ function pruneEmitters(now){
   if(cut > 0) emitters.splice(0, cut);
 }
 
-// ====== 形变（循环：□→○→△→□） ======
+// ===== 形变（循环：□→○→△→□）=====
 function drawLoopCycle(elapsedMs, scale){
   const p = elapsedMs % CYCLE_MS;
   const stage = Math.floor(p / SEG_MS); // 0:□→○, 1:○→△, 2:△→□
@@ -251,7 +246,7 @@ function drawLoopCycle(elapsedMs, scale){
   endShape(CLOSE);
 }
 
-// ====== 形状与布局 ======
+// ===== 形状与布局 =====
 function drawShape(xs,ys){
   beginShape(); for(let i=0;i<N;i++) vertex(xs[i]*sScale, ys[i]*sScale); endShape(CLOSE);
 }
@@ -276,7 +271,7 @@ function computeGridLayout(){
   maxReachDist = dist(tl.x,tl.y, br.x,br.y) + 2*tileDiam + 200;
 }
 
-// ====== 多边形重采样 ======
+// ===== 多边形重采样 =====
 function buildTrianglePoints(outX,outY,n,r){
   const poly=[]; for(let i=0;i<3;i++){ const a=-HALF_PI+TWO_PI*i/3; poly.push({x:r*Math.cos(a),y:r*Math.sin(a)}); }
   poly.push({...poly[0]}); resampleToArrays(poly,n,outX,outY);
@@ -303,48 +298,72 @@ function vdist(p,q){ return Math.hypot(p.x-q.x, p.y-q.y); }
 function vlerp(a,b,t){ return {x:lerp(a.x,b.x,t), y:lerp(a.y,b.y,t)}; }
 function easeInOutCubic(x){ return (x<0.5)?4*x*x*x:1-Math.pow(-2*x+2,3)/2; }
 
-// ====== 控制模式（旋钮）绘制 ======
-function drawSceneFrozen(){
-  // 冻结时，只把当前时刻的画面画出来（注意：clock 已暂停，logicalNow 不变）
-  renderGrid();
-}
-
+// ===== 旋钮覆盖层（30–3000ms 线性刻度）=====
 function drawKnobOverlay(){
   const c = knob.center;
-  // 背景遮罩
+
+  // 半透明遮罩
   noStroke(); fill(0, 160); rect(0,0,width,height);
-  // 外圈
+
   push();
   translate(c.x, c.y);
-  stroke(255,220); strokeWeight(3); noFill();
-  circle(0,0, KNOB_RADIUS*2);
 
-  // 刻度
-  const ticks = 24;
-  for(let i=0;i<ticks;i++){
-    const a = (i/ticks)*TWO_PI;
-    const r1 = KNOB_RADIUS-10, r2 = KNOB_RADIUS;
-    line(r1*cos(a), r1*sin(a), r2*cos(a), r2*sin(a));
+  // 外圈
+  stroke(255, 220); strokeWeight(3); noFill();
+  circle(0, 0, KNOB_RADIUS * 2);
+
+  // 刻度：主刻度 12 个，细分 4
+  const major = 12, minorPerMajor = 4;
+  const minDeg = -150, maxDeg = 150;
+
+  textAlign(CENTER, CENTER);
+  textSize(12);
+
+  // 主刻度与标签
+  for (let i = 0; i <= major; i++) {
+    const t = i / major;
+    const rad = lerp(minDeg, maxDeg, t) * PI / 180;
+    const r1 = KNOB_RADIUS - 12, r2 = KNOB_RADIUS;
+    stroke(255, 220); strokeWeight(2);
+    line(r1 * cos(rad), r1 * sin(rad), r2 * cos(rad), r2 * sin(rad));
+
+    // 只显示间隔的标签，防止拥挤
+    if (i % 2 === 0) {
+      const ms = Math.round(lerp(HOLD_MIN, HOLD_MAX, t));
+      noStroke(); fill(200);
+      const tx = (KNOB_RADIUS + 20) * cos(rad);
+      const ty = (KNOB_RADIUS + 20) * sin(rad);
+      text(ms, tx, ty);
+    }
   }
 
-  // 旋钮指针（与 HOLD_MS 映射到 [-150°, +150°]）
-  const t = map(HOLD_MS, HOLD_MIN, HOLD_MAX, -150, 150, true) * PI/180;
-  stroke(255); strokeWeight(6);
-  line(0,0, (KNOB_RADIUS-16)*cos(t), (KNOB_RADIUS-16)*sin(t));
+  // 细分刻度
+  stroke(255, 140); strokeWeight(1);
+  for (let i = 0; i < major; i++) {
+    for (let j = 1; j < minorPerMajor; j++) {
+      const t = (i + j / minorPerMajor) / major;
+      const rad = lerp(minDeg, maxDeg, t) * PI / 180;
+      const r1 = KNOB_RADIUS - 8, r2 = KNOB_RADIUS;
+      line(r1 * cos(rad), r1 * sin(rad), r2 * cos(rad), r2 * sin(rad));
+    }
+  }
 
-  // 文本
-  noStroke(); fill(255);
-  textAlign(CENTER,CENTER);
-  textSize(18);
-  text(`HOLD_MS = ${Math.round(HOLD_MS)} ms`, 0, KNOB_RADIUS+26);
+  // 指针（HOLD_MS → 角度）
+  const pointerRad = map(HOLD_MS, HOLD_MIN, HOLD_MAX, minDeg, maxDeg, true) * PI / 180;
+  stroke(255); strokeWeight(6);
+  line(0, 0, (KNOB_RADIUS - 16) * cos(pointerRad), (KNOB_RADIUS - 16) * sin(pointerRad));
+  noStroke(); fill(255, 200); circle(0, 0, 6);
+
+  // 数值读数
+  fill(255); textSize(18); text(`HOLD_MS = ${Math.round(HOLD_MS)} ms`, 0, KNOB_RADIUS + 28);
+  fill(180); textSize(12); text(`Range: ${HOLD_MIN}–${HOLD_MAX} ms`, 0, KNOB_RADIUS + 46);
   pop();
 }
 
-// ====== 触摸 / 鼠标 ======
-// —— 鼠标（桌面）——
+// ===== 桌面鼠标 =====
 function mousePressed(){
   if(knob.active){
-    // 控制模式下，单击空白退出（这里简单处理，统一退出）
+    // 控制模式下：单击退出
     knob.active = false;
     clockPaused = false;
     return;
@@ -357,21 +376,19 @@ function mouseDragged(){ lastPointer = {x:mouseX,y:mouseY}; }
 function mouseMoved(){ if(isPointerDown) lastPointer = {x:mouseX,y:mouseY}; }
 function mouseReleased(){ isPointerDown=false; isLongPress=false; }
 
-// —— 触摸（移动端，多指）——
+// ===== 触摸（多指）=====
 function touchStarted(){
   if(touches.length >= 2){
     // 进入旋钮控制模式
     enterKnobMode();
     return false;
   }
-
   if(knob.active && touches.length === 1){
     // 单指点击空白：退出控制模式
     knob.active = false;
     clockPaused = false;
     return false;
   }
-
   // 普通单指：准备长按
   isPointerDown = true; isLongPress = false;
   downAtMs = logicalNow;
@@ -394,16 +411,14 @@ function touchMoved(){
 
 function touchEnded(){
   if(touches.length === 0){
-    // 所有手指离开
     isPointerDown = false;
     isLongPress = false;
   }
   return false;
 }
 
-// ====== 旋钮模式：进入/更新 ======
+// ===== 旋钮模式：进入/更新 =====
 function enterKnobMode(){
-  // 计算两指中心与距离
   const p1 = {x: touches[0].x, y: touches[0].y};
   const p2 = {x: touches[1].x, y: touches[1].y};
   knob.center = { x: (p1.x+p2.x)/2, y: (p1.y+p2.y)/2 };
@@ -425,19 +440,12 @@ function updateKnobWithPinch(){
   // 旋钮位置跟随两指中心
   knob.center = center;
 
-  // 捏合（距离变小） → 逆时针；张开 → 顺时针
-  const delta = curDist - knob.lastDist; // >0 张开；<0 捏合
-  knob.angle += delta * 0.6; // 只用于视觉动画
+  // 捏合（距离变小）→ 逆时针；张开 → 顺时针（仅视觉）
+  const delta = curDist - knob.lastDist;
+  knob.angle += delta * 0.6;
 
-  // 将距离变化映射到 HOLD_MS
+  // 距离变化 → HOLD_MS（限制到 30–3000ms）
   HOLD_MS = constrain(HOLD_MS + delta * KNOB_SENSITIVITY, HOLD_MIN, HOLD_MAX);
 
   knob.lastDist = curDist;
 }
-
-// ====== 工具 ======
-function drawShape(xs,ys){
-  beginShape(); for(let i=0;i<N;i++) vertex(xs[i]*sScale, ys[i]*sScale); endShape(CLOSE);
-}
-function vdist(p,q){ return Math.hypot(p.x-q.x, p.y-q.y); }
-function vlerp(a,b,t){ return {x:lerp(a.x,b.x,t), y:lerp(a.y,b.y,t)}; }

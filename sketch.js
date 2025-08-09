@@ -11,7 +11,7 @@ const N = 120, SW_MAIN = 3.0, BASE_ALPHA = 230;
 
 const HALF_MS = 300;           // 变形时长固定
 let   HOLD_MS = 1500;          // 停留时长（旋钮控制）
-const HOLD_MIN = 300, HOLD_MAX = 4000;
+const HOLD_MIN = 30, HOLD_MAX = 4000;
 
 const LONGPRESS_MS = 350;
 const WAVE_SPEED_PX_PER_MS = 0.8;
